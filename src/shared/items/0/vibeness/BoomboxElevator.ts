@@ -1,0 +1,32 @@
+import Difficulty from "@rbxts/ejt";
+import CurrencyBundle from "shared/currency/CurrencyBundle";
+import Item from "shared/item/Item";
+import DropperBooster from "shared/item/traits/boost/DropperBooster";
+import Conveyor from "shared/item/traits/conveyor/Conveyor";
+import MagicalCraftingTable from "shared/items/0/millisecondless/MagicalCraftingTable";
+import Gold from "shared/items/excavation/Gold";
+import CorruptedGrass from "shared/items/0/happylike/CorruptedGrass";
+import Quartz from "shared/items/excavation/Quartz";
+
+export = new Item(script.Name)
+    .setName("Boombox Elevator")
+    .setDescription(
+        "Elevate your droplets while listening to some vibey tunes! If you place droppers in front of the boombox, they might also enjoy these tunes and have better production as well...",
+    )
+    .setDifficulty(Difficulty.Vibeness)
+    .setPrice(new CurrencyBundle().set("Skill", 10000000).set("Power", 250e24).set("Dark Matter", 25e27), 1)
+    .setRequiredItemAmount(Quartz, 2)
+    .setRequiredItemAmount(Gold, 6)
+    .setRequiredItemAmount(CorruptedGrass, 2)
+    .addPlaceableArea("BarrenIslands")
+    .soldAt(MagicalCraftingTable)
+    .setCreator("sanjay2133")
+    .persists()
+
+    .trait(Conveyor)
+    .setSpeed(3)
+
+    .trait(DropperBooster)
+    .setDropRateMul(1.25)
+
+    .exit();

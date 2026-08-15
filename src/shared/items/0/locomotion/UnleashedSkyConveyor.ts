@@ -1,0 +1,26 @@
+import Difficulty from "@rbxts/ejt";
+import CurrencyBundle from "shared/currency/CurrencyBundle";
+import Item from "shared/item/Item";
+import Conveyor from "shared/item/traits/conveyor/Conveyor";
+import UnleashedConveyor from "shared/item/traits/conveyor/UnleashedConveyor";
+import Upgrader from "shared/item/traits/upgrader/Upgrader";
+import Class0Shop from "shared/items/0/Class0Shop";
+
+export = new Item(script.Name)
+    .setName("Unleashed Sky Conveyor")
+    .setDescription("And now, a conveyor to convey your super-elevated droplets.")
+    .setDifficulty(Difficulty.Locomotion)
+    .setPrice(new CurrencyBundle().set("Skill", 12), 1, 15)
+    .setPrice(new CurrencyBundle().set("Skill", 24), 16, 30)
+    .addPlaceableArea("BarrenIslands", "SlamoVillage")
+    .soldAt(Class0Shop)
+    .persists("Skillification")
+
+    .trait(Upgrader)
+    .setSky(true)
+
+    .trait(Conveyor)
+    .setSpeed(9)
+
+    .trait(UnleashedConveyor)
+    .exit();

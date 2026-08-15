@@ -1,0 +1,313 @@
+//!native
+//!optimize 2
+import Signal from "@antivivi/lemon-signal";
+import { getAllInstanceInfo, simpleInterval } from "@antivivi/vrldk";
+import { exactSetProperty } from "@rbxts/fletchette";
+import { Server } from "shared/api/APIExpose";
+import { IS_EDIT, IS_SERVER } from "shared/Context";
+import eat from "shared/hamster/eat";
+import Item from "shared/item/Item";
+import type Condenser from "shared/item/traits/dropper/Condenser";
+import Operative, { IOperative } from "shared/item/traits/Operative";
+import isPlacedItemUnusable from "shared/item/utils/isPlacedItemUnusable";
+import { VirtualCollision } from "shared/item/utils/VirtualReplication";
+
+declare global {
+    interface ItemTraits {
+        Upgrader: Upgrader;
+    }
+
+    interface UpgradeInfo {
+        /**
+         * The upgrader model that applied this upgrade. If the model is destroyed,
+         * the upgrade is considered inactive.
+         */
+        model: Model;
+        /**
+         * The upgrader item that applied this upgrade.
+         */
+        item?: Item;
+        /**
+         * The upgrade's boost stats.
+         */
+        boost?: IOperative;
+        /**
+         * An upgrade that effectively does nothing. Toggled by {@link Condenser}.
+         */
+        empty?: boolean;
+    }
+
+    interface InstanceInfo {
+        /** The ID of the laser that this instance is associated with. */
+        laserId?: string;
+        /** The upgrades applied to this instance, keyed by a unique identifier. */
+        upgrades?: Map<string, UpgradeInfo>;
+        /** A signal that fires when the upgrader has upgraded a droplet. */
+        upgraderTriggered?: Signal<(dropletModel: BasePart) => void>;
+
+        /**
+         * Whether the droplet has reached the skyline.
+         * The skyline is located at the level in which droplets are legally elevated high enough to fall into cauldrons.
+         *
+         * This property exists to prevent exploits in which droplets that have not reached the skyline are dropped into cauldrons.
+         */
+        sky?: boolean;
+    }
+
+    interface ItemBoost {
+        /**
+         * The operative that upgrades the {@link Upgrader} that is boosted.
+         *
+         * This is used to apply the boost to the upgrader's lasers.
+         */
+        upgradeCompound?: IOperative;
+    }
+}
+
+/**
+ * An upgrader is an item that has lasers that upgrade droplets that pass through them.
+ */
+export default class Upgrader extends Operative {
+    /**
+     * A function that checks whether a droplet meets the requirements to be upgraded.
+     */
+    requirement?: (dropletInfo: InstanceInfo) => boolean;
+
+    /**
+     * Whether the upgrader makes droplets reach the skyline after being upgraded.
+     */
+    sky?: boolean;
+
+    /**
+     * Whether the lasers in this upgrader upgrade droplets independently.
+     */
+    isStacks?: boolean;
+
+    static readonly SPAWNED_LASERS = new Map<string, Set<BasePart>>();
+
+    /**
+     * Upgrades a droplet with the given upgrader.
+     */
+    static upgrade({
+        model,
+        modelInfo = getAllInstanceInfo(model),
+        upgrader,
+        dropletInfo,
+        laserId,
+        laserInfo,
+        droplet,
+        deco,
+    }: {
+        /** The upgrader model. */
+        model: Model;
+        /** The information about the upgrader model. */
+        modelInfo?: InstanceInfo;
+        /** The upgrader being used. */
+        upgrader: Upgrader;
+        /** The information about the droplet being upgraded. */
+        dropletInfo: InstanceInfo;
+        /** The ID of the laser that is upgrading the droplet. */
+        laserId?: string;
+        /** The information about the laser that is upgrading the droplet. */
+        laserInfo: InstanceInfo;
+        /** The droplet being upgraded. */
+        droplet: BasePart;
+        /** An optional decoration function to modify the upgrade info. */
+        deco?: (upgrade: UpgradeInfo) => void;
+    }) {
+        if (dropletInfo.incinerated === true) return;
+        if (upgrader.requirement !== undefined && !upgrader.requirement(dropletInfo)) return;
+
+        if (laserInfo.sky === true) dropletInfo.sky = true;
+        let upgrades = dropletInfo.upgrades;
+        const item = upgrader.item;
+
+        if (laserId === undefined) {
+            laserId ??= upgrader.isStacks === false ? item.id : model.Name + "_" + laserInfo.laserId;
+        }
+
+        if (upgrades === undefined) upgrades = new Map();
+        else if (upgrades.has(laserId)) return;
+
+        if (isPlacedItemUnusable(modelInfo) || laserInfo.maintained === false) return;
+
+        if (upgrades === undefined) upgrades = new Map();
+        let [totalAdd, totalMul, totalPow] = [upgrader.add, upgrader.mul, upgrader.pow];
+
+        const boosts = modelInfo.boosts;
+        if (boosts !== undefined) {
+            for (const [_, boost] of boosts) {
+                const stats = boost.upgradeCompound;
+                if (stats === undefined) continue;
+                [totalAdd, totalMul, totalPow] = Operative.applySpreadOperative(
+                    totalAdd,
+                    totalMul,
+                    totalPow,
+                    stats.add,
+                    stats.mul,
+                    stats.pow,
+                );
+            }
+        }
+
+        const upgrade: UpgradeInfo = {
+            model,
+            item,
+            boost: {
+                add: totalAdd,
+                mul: totalMul,
+                pow: totalPow,
+            },
+        };
+        if (deco !== undefined) deco(upgrade);
+        upgrades.set(laserId, upgrade);
+        dropletInfo.upgrades = upgrades;
+        modelInfo.upgraderTriggered?.fire(droplet);
+    }
+
+    /**
+     * Hooks a laser to an upgrader, registering the necessary events to upgrade droplets passing through it.
+     * This function needs to be called on both the server and client.
+     * @param model The item model where the laser is located.
+     * @param upgrader The upgrader instance that will manage the laser.
+     * @param laser The laser part being hooked.
+     * @param deco Optional decoration function to modify the upgrade info.
+     */
+    static hookLaser(model: Model, upgrader: Upgrader, laser: BasePart, deco?: (upgradeInfo: UpgradeInfo) => void) {
+        if (IS_SERVER || IS_EDIT) {
+            const modelInfo = getAllInstanceInfo(model);
+            const laserInfo = getAllInstanceInfo(laser);
+            VirtualCollision.onDropletTouched(model, laser, (droplet, dropletInfo) => {
+                this.upgrade({
+                    model,
+                    modelInfo,
+                    upgrader,
+                    dropletInfo,
+                    laserInfo,
+                    droplet,
+                    deco,
+                });
+            });
+            laserInfo.itemModelInfo = modelInfo;
+            model.Destroying.Once(() => {
+                modelInfo.upgraderTriggered?.destroy();
+            });
+        }
+
+        const spawnedLasers = this.SPAWNED_LASERS.get(model.Name);
+        if (spawnedLasers !== undefined) {
+            spawnedLasers.add(laser);
+        } else {
+            this.SPAWNED_LASERS.set(model.Name, new Set([laser]));
+        }
+    }
+
+    static sharedLoad(model: Model, upgrader: Upgrader) {
+        const modelInfo = getAllInstanceInfo(model);
+        modelInfo.upgraderTriggered ??= new Signal();
+
+        let i = 0;
+        for (const laser of model.GetDescendants()) {
+            if (!laser.HasTag("Laser") || !laser.IsA("BasePart")) continue;
+
+            const laserInfo = getAllInstanceInfo(laser);
+            laserInfo.laserId = tostring(i++);
+            laserInfo.sky = upgrader.sky;
+            Upgrader.hookLaser(model, upgrader, laser);
+        }
+        if (IS_SERVER || IS_EDIT) {
+            upgrader.item.maintain(model);
+        }
+
+        model.Destroying.Once(() => this.SPAWNED_LASERS.delete(model.Name));
+    }
+
+    constructor(item: Item) {
+        super(item);
+        item.onSharedLoad((model) => Upgrader.sharedLoad(model, this));
+    }
+
+    /**
+     * Set whether droplets passing through this upgrader will reach the skyline after being upgraded.
+     *
+     * @param sky Whether the upgrader makes droplets reach the skyline.
+     * @returns The upgrader instance for chaining.
+     */
+    setSky(sky: boolean) {
+        this.sky = sky;
+        return this;
+    }
+
+    /**
+     * Set whether this upgrader has multiple lasers that each independently upgrade droplets.
+     *
+     * @param isStacks Whether the upgrader has multiple lasers that upgrade droplets independently. Defaults to true.
+     * @returns The upgrader instance for chaining.
+     */
+    stacks(isStacks: boolean) {
+        this.isStacks = isStacks;
+        return this;
+    }
+
+    /**
+     * Sets a requirement for droplets to be upgraded by this upgrader.
+     *
+     * @param requirement A function that takes the droplet's instance information and returns whether it should be upgraded.
+     * @returns The upgrader instance for chaining.
+     */
+    setRequirement(requirement: (dropletInfo: InstanceInfo) => boolean) {
+        this.requirement = requirement;
+        return this;
+    }
+
+    /**
+     * Gets the boosts an upgrade from an Upgrader would give.
+     *
+     * @param upgradeInfo Upgrade information
+     * @returns A tuple containing the operative boosts and whether the upgrade should be reversed.
+     */
+    static getUpgrade(upgradeInfo: UpgradeInfo): LuaTuple<[IOperative?, boolean?]> {
+        const boost = upgradeInfo.boost;
+        if (boost === undefined) return $tuple();
+
+        const isGone = upgradeInfo.model === undefined || upgradeInfo.model.Parent === undefined;
+        const isEmpty = upgradeInfo.empty === true;
+        if (isGone || isEmpty) {
+            if (isGone && isEmpty) return $tuple(boost, true);
+            return $tuple();
+        }
+
+        return $tuple(boost, false);
+    }
+
+    static {
+        const hiddenUpgradersPacket = exactSetProperty<string>();
+
+        if (IS_SERVER || IS_EDIT) {
+            const cleanup = simpleInterval(() => {
+                const set = new Set<string>();
+                for (const [placementId] of this.SPAWNED_LASERS) {
+                    const model = Server.Item.modelPerPlacementId.get(placementId);
+                    if (model === undefined) continue;
+                    if (isPlacedItemUnusable(getAllInstanceInfo(model))) {
+                        set.add(placementId);
+                    }
+                }
+                hiddenUpgradersPacket.set(set);
+            }, 0.5);
+            eat(cleanup);
+        }
+
+        if (!IS_SERVER || IS_EDIT) {
+            const connection = hiddenUpgradersPacket.observe((placementIds) => {
+                for (const [placementId, lasers] of this.SPAWNED_LASERS) {
+                    const isHidden = placementIds.has(placementId);
+                    for (const laser of lasers) {
+                        laser.LocalTransparencyModifier = isHidden ? 1 : 0;
+                    }
+                }
+            });
+            eat(connection, "Disconnect");
+        }
+    }
+}

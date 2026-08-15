@@ -1,0 +1,91 @@
+import { Debris, Players } from "@rbxts/services";
+import { Server } from "shared/api/APIExpose";
+import Command from "shared/commands/Command";
+
+export = new Command(script.Name)
+    .addAlias("vr")
+    .setDescription("<player> : Vote to restrict a player.")
+    .setExecute((sender, p) => {
+        if (sender === undefined) {
+            warn("voterestrict command can only be run by a player.");
+            return;
+        }
+
+        const targets = Server.Command.findPlayers(sender, p);
+        if (targets.size() < 1) {
+            Server.ChatHook.sendPrivateMessage(sender, `Could not find matching players ${p}`, "color:255,43,43");
+            return;
+        }
+        const data = Server.empireData;
+        const playerCount = Players.GetPlayers()
+            .filter((player) => Server.Permissions.getPermissionLevel(player.UserId) > -1)
+            .size();
+        for (const target of targets) {
+            const userId = target.UserId;
+            if (Server.Permissions.getPermissionLevel(userId) >= 1) {
+                Server.ChatHook.sendPrivateMessage(
+                    sender,
+                    "You can't vote to restrict a trusted player",
+                    "color:255,43,43",
+                );
+                continue;
+            }
+            if (sender.FindFirstChild(userId) !== undefined) {
+                Server.ChatHook.sendPrivateMessage(
+                    sender,
+                    "You have already voted to restrict this player",
+                    "color:255,43,43",
+                );
+                continue;
+            }
+            const votes = ((target.GetAttribute("Votes") as number) ?? 0) + 1;
+            target.SetAttribute("Votes", votes);
+            if (votes === 0) {
+                Server.ChatHook.sendServerMessage(
+                    `A vote has started to restrict player ${target.Name}. Type /vr ${target.Name} to vote to restrict them too.`,
+                    "color:138,255,138",
+                );
+            }
+            const requirement = math.round((playerCount * 2) / 3);
+            Server.ChatHook.sendServerMessage(`${votes}/${requirement} votes needed.`, "color:138,255,138");
+            const voteToken = new NumberValue();
+            voteToken.Value = tick();
+            voteToken.Name = tostring(userId);
+            voteToken.Parent = sender;
+            Debris.AddItem(voteToken, 60);
+            task.delay(60, () => {
+                if (target === undefined) {
+                    return;
+                }
+                target.SetAttribute("Votes", (target.GetAttribute("Votes") as number) - 1);
+                if ((target.GetAttribute("RestrictionTime") as number) ?? 0 < tick()) {
+                    Server.ChatHook.sendPrivateMessage(
+                        sender,
+                        `Your vote to restrict ${target.Name} has worn off.`,
+                        "color:138,255,138",
+                    );
+                }
+            });
+            Server.ChatHook.sendPrivateMessage(
+                sender,
+                `Voted to restrict ${target.Name}. Your vote will wear off after 60 seconds.`,
+                "color:138,255,138",
+            );
+            if (votes >= requirement) {
+                Server.ChatHook.sendServerMessage(
+                    `${target.Name} has been restricted for 20 minutes.`,
+                    "color:138,255,138",
+                );
+                data.restricted.set(userId, tick() + 1200);
+                task.delay(1201, () => {
+                    const t = data.restricted.get(userId);
+                    if (t === undefined || tick() - t > 0) {
+                        data.restricted.delete(userId);
+                        Server.Permissions.updatePermissionLevel(userId);
+                    }
+                });
+                Server.Permissions.updatePermissionLevel(userId);
+            }
+        }
+    })
+    .setPermissionLevel(0);

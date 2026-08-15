@@ -1,0 +1,32 @@
+import Difficulty from "@rbxts/ejt";
+import Furnace from "shared/item/traits/Furnace";
+import Item from "shared/item/Item";
+import CurrencyBundle from "shared/currency/CurrencyBundle";
+import Formula from "shared/currency/Formula";
+import { Server } from "shared/api/APIExpose";
+import Class0Shop from "shared/items/0/Class0Shop";
+
+const mul = new CurrencyBundle();
+
+export = new Item(script.Name)
+    .setName("Glistening Furnace")
+    .setDescription(
+        "The far successor to the Energised Furnace. Was that nostalgic? Boosts Skill with Power, maxes out at %cap%.",
+    )
+    .setDifficulty(Difficulty.AutomaticJoyful)
+    .setPrice(new CurrencyBundle().set("Power", 4e21).set("Skill", 6000), 1)
+    .addPlaceableArea("BarrenIslands", "SlamoVillage")
+    .soldAt(Class0Shop)
+    .persists("Skillification")
+
+    .setFormula(new Formula().div(1e18).add(10).pow(0.12))
+    .setFormulaX("power")
+    .setFormulaXCap(new CurrencyBundle().set("Power", 1e27))
+
+    .trait(Furnace)
+    .applyFormula(
+        (v, item) => item.setMul(mul.set("Skill", v)),
+        () => Server.Currency.get("Power"),
+    )
+
+    .exit();

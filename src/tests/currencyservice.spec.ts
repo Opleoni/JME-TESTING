@@ -1,0 +1,90 @@
+import { beforeEach, describe, expect, it } from "@rbxts/jest-globals";
+import { OnoeNum } from "@rbxts/serikanum";
+import { Server } from "shared/api/APIExpose";
+import CurrencyBundle from "shared/currency/CurrencyBundle";
+
+describe("CurrencyService", () => {
+    beforeEach(() => {
+        Server.Currency.set("Funds", new OnoeNum(0));
+        Server.Currency.set("Power", new OnoeNum(0));
+        Server.empireData.currencyGainMultipliers.clear();
+    });
+
+    it("sets and retrieves currency balances", () => {
+        const amount = new OnoeNum(250);
+        Server.Currency.set("Funds", amount);
+
+        expect(Server.Currency.get("Funds").equals(amount)).toBe(true);
+    });
+
+    it("increments currencies cumulatively", () => {
+        Server.Currency.set("Funds", new OnoeNum(10));
+        Server.Currency.increment("Funds", new OnoeNum(5));
+
+        expect(Server.Currency.get("Funds").equals(new OnoeNum(15))).toBe(true);
+    });
+
+    it("applies gain multipliers when incrementing currencies", () => {
+        Server.Currency.setGainMultiplier("Funds", 2);
+        Server.Currency.increment("Funds", new OnoeNum(5));
+
+        expect(Server.Currency.get("Funds").equals(new OnoeNum(10))).toBe(true);
+    });
+
+    it("applies gain multipliers when incrementing multiple currencies", () => {
+        Server.Currency.setGainMultiplier("Funds", 2);
+        Server.Currency.setGainMultiplier("Power", 3);
+
+        const delta = new Map<Currency, OnoeNum>([
+            ["Funds", new OnoeNum(1)],
+            ["Power", new OnoeNum(4)],
+        ]);
+        Server.Currency.incrementAll(delta);
+
+        expect(Server.Currency.get("Funds").equals(new OnoeNum(2))).toBe(true);
+        expect(Server.Currency.get("Power").equals(new OnoeNum(12))).toBe(true);
+    });
+
+    it("performs purchases when balance suffices", () => {
+        Server.Currency.set("Funds", new OnoeNum(100));
+        const price = new CurrencyBundle().set("Funds", 40);
+
+        const success = Server.Currency.purchase(price);
+
+        expect(success).toBe(true);
+        expect(Server.Currency.get("Funds").equals(new OnoeNum(60))).toBe(true);
+    });
+
+    it("rejects purchases that exceed balance", () => {
+        Server.Currency.set("Funds", new OnoeNum(20));
+        const price = new CurrencyBundle().set("Funds", 50);
+
+        const success = Server.Currency.purchase(price);
+
+        expect(success).toBe(false);
+        expect(Server.Currency.get("Funds").equals(new OnoeNum(20))).toBe(true);
+    });
+
+    it("emits balanceChanged when propagating updates", () => {
+        let observed = false;
+        const connection = Server.Currency.balanceChanged.connect((bundle) => {
+            observed = bundle.get("Funds")?.equals(new OnoeNum(75)) ?? false;
+        });
+
+        Server.Currency.set("Funds", new OnoeNum(75));
+        Server.Currency.propagate();
+        connection.Disconnect();
+
+        expect(observed).toBe(true);
+    });
+
+    it("computes offline revenue from recent gains", () => {
+        Server.empireData.playtime = 200;
+        Server.empireData.lastResetPlaytime = 100;
+        Server.empireData.mostCurrenciesSinceReset.set("Funds", new OnoeNum(500));
+
+        const revenue = Server.Currency.getOfflineRevenue();
+        // CurrencyService uses a minimum diff of 600 seconds, so revenue = 500 / 600
+        expect(revenue.get("Funds")?.equals(new OnoeNum(500).div(new OnoeNum(600)))).toBe(true);
+    });
+});

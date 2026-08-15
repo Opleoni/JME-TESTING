@@ -1,0 +1,333 @@
+import {
+    BadgeService,
+    DataStoreService,
+    HttpService,
+    MarketplaceService,
+    Players,
+    TeleportService,
+} from "@rbxts/services";
+import { Server } from "shared/api/APIExpose";
+import { IS_EDIT, IS_PUBLIC_SERVER, IS_SERVER, IS_SINGLE_SERVER, IS_STUDIO } from "shared/Context";
+import PlayerProfileTemplate from "shared/data/profile/PlayerProfileTemplate";
+import { EmpireProfileManager, PlayerProfileManager } from "shared/data/profile/ProfileManager";
+import Packets from "shared/Packets";
+
+declare global {
+    /**
+     * Represents the information about an empire that is exposed to the client.
+     */
+    interface EmpireInfo {
+        /**
+         * The name of the empire.
+         */
+        name: string;
+        /**
+         * The ID of the owner of the empire.
+         */
+        owner: number;
+        /**
+         * The UNIX timestamp when the empire was created.
+         */
+        created: number;
+        /**
+         * The total playtime of the empire in seconds.
+         */
+        playtime: number;
+    }
+}
+
+/**
+ * Manages the list of empires available to each player.
+ * Provides functions to get, add, remove, and create empires.
+ */
+namespace AvailableEmpire {
+    /**
+     * DataStore for tracking which empires each player has access to.
+     */
+    const DATA_STORE =
+        IS_SERVER || IS_EDIT
+            ? (() => {
+                  try {
+                      const store = DataStoreService.GetDataStore("AvailableEmpires");
+                      return store;
+                  } catch (error) {
+                      if (!IS_STUDIO) warn("Failed to get AvailableEmpires DataStore:", error);
+                      return undefined;
+                  }
+              })()
+            : undefined;
+
+    /**
+     * Cache of available empires per player to reduce DataStore calls.
+     */
+    const availableEmpiresPerPlayer = new Map<number, Map<string, EmpireInfo>>();
+
+    export const dataPerPlayer = new Map<number, typeof PlayerProfileTemplate>();
+
+    /**
+     * Gets basic information about an empire.
+     *
+     * @param empireId The ID of the empire to get info for.
+     * @returns Empire information object.
+     */
+    export function getInfo(empireId: string) {
+        const empire = EmpireProfileManager.load(empireId, true);
+        if (empire === undefined) throw "No such empire " + empireId;
+        return {
+            name: empire.Data.name,
+            owner: empire.Data.owner,
+            created: empire.Data.created,
+            playtime: empire.Data.playtime,
+        };
+    }
+
+    /**
+     * Updates the available empires for a player both in cache and client.
+     *
+     * @param userId The user ID to update.
+     * @param availableEmpires The new available empires map.
+     */
+    export function update(userId: number, availableEmpires: Map<string, EmpireInfo>) {
+        availableEmpiresPerPlayer.set(userId, availableEmpires);
+        const plr = Players.GetPlayerByUserId(userId);
+        if (plr !== undefined) {
+            Packets.availableEmpires.setFor(plr, availableEmpires);
+        }
+    }
+
+    /**
+     * Gets the list of empires a player has access to.
+     * Uses caching to reduce DataStore calls.
+     *
+     * @param userId The user ID to get available empires for.
+     * @returns Map of empire IDs to empire information.
+     */
+    export function get(userId: number): Map<string, EmpireInfo> {
+        if (DATA_STORE === undefined) {
+            return new Map<string, EmpireInfo>();
+        }
+
+        const cached = availableEmpiresPerPlayer.get(userId);
+        if (cached !== undefined) {
+            return cached;
+        }
+        const key = "Player_" + userId;
+        const result = DATA_STORE.GetAsync(key);
+        let data = result === undefined ? undefined : result[0];
+        data ??= new Map<string, EmpireInfo>();
+
+        if ((data as string[])[0] !== undefined) {
+            const mapped = new Map<string, EmpireInfo>();
+            for (const empireId of data as string[]) mapped.set(empireId, getInfo(empireId));
+            task.spawn(() => DATA_STORE.SetAsync(key, mapped));
+            availableEmpiresPerPlayer.set(userId, mapped);
+            return mapped;
+        }
+
+        availableEmpiresPerPlayer.set(userId, data as Map<string, EmpireInfo>);
+        return data as Map<string, EmpireInfo>;
+    }
+
+    /**
+     * Adds an empire to a player's available empires list.
+     *
+     * @param userId The user ID to add the empire for.
+     * @param empire The empire ID to add.
+     */
+    export function add(userId: number, empire: string) {
+        if (DATA_STORE === undefined) {
+            throw "Cannot add available empires on client";
+        }
+
+        const [availableEmpires] = DATA_STORE.UpdateAsync(
+            "Player_" + userId,
+            (oldValue: Map<string, EmpireInfo> | undefined) => {
+                if (oldValue === undefined) {
+                    return $tuple(new Map([[empire, getInfo(empire)]]));
+                }
+                if (oldValue.has(empire)) {
+                    return $tuple(oldValue);
+                }
+                oldValue.set(empire, getInfo(empire));
+                return $tuple(oldValue);
+            },
+        );
+        if (availableEmpires !== undefined) {
+            update(userId, availableEmpires);
+        }
+    }
+
+    /**
+     * Removes an empire from a player's available empires list.
+     *
+     * @param userId The user ID to remove the empire for.
+     * @param empire The empire ID to remove.
+     */
+    export function remove(userId: number, empire: string) {
+        if (DATA_STORE === undefined) {
+            throw "Cannot remove available empires on client";
+        }
+
+        const [availableEmpires] = DATA_STORE.UpdateAsync(
+            "Player_" + userId,
+            (oldValue: Map<string, EmpireInfo> | undefined) => {
+                if (oldValue === undefined) {
+                    return $tuple(new Map<string, EmpireInfo>());
+                }
+                const availableEmpires = new Map<string, EmpireInfo>();
+                for (const [k, v] of pairs(oldValue)) if (k !== empire) availableEmpires.set(k, v);
+                return $tuple(availableEmpires);
+            },
+        );
+        if (availableEmpires !== undefined) {
+            update(userId, availableEmpires);
+        }
+    }
+    let debounce = 0;
+
+    /**
+     * Creates a new empire for a player.
+     * Checks permissions, gamepass ownership, and generates a new empire with reserved server.
+     *
+     * @param player The player requesting to create an empire.
+     * @returns Whether the empire was successfully created.
+     */
+    export function create(player: Player) {
+        if (os.clock() - debounce < 0.5 || IS_SINGLE_SERVER) {
+            return false;
+        }
+        debounce = os.clock();
+        const playerProfile = PlayerProfileManager.load(player.UserId);
+        if (playerProfile === undefined) throw "wtf";
+        const playerData = playerProfile.Data;
+
+        const ownedEmpireCount = playerData.ownedEmpires.size();
+        if (ownedEmpireCount > 3 && !MarketplaceService.UserOwnsGamePassAsync(player.User, 1527189792)) {
+            return false;
+        }
+        if (ownedEmpireCount > 13) {
+            return false;
+        }
+
+        const empireId = HttpService.GenerateGUID(false);
+        const newProfile = EmpireProfileManager.load(empireId);
+        if (newProfile !== undefined) {
+            newProfile.AddUserId(player.UserId);
+            let name = player.DisplayName + "'s Empire";
+            if (ownedEmpireCount > 0) name += " " + (ownedEmpireCount + 1);
+            newProfile.Data.name = name;
+            newProfile.Data.owner = player.UserId;
+            newProfile.Data.created = tick();
+            const [success, result] = pcall(() => {
+                const [accessCode] = TeleportService.ReserveServer(game.PlaceId);
+                return accessCode;
+            });
+            if (success === true) {
+                newProfile.Data.accessCode = result;
+            } else if (!IS_STUDIO) {
+                return false;
+            }
+            playerData.ownedEmpires.push(empireId);
+            AvailableEmpire.add(player.UserId, empireId);
+            EmpireProfileManager.unload(empireId);
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * Teleports a player to their empire's private server.
+     *
+     * @param player The player to teleport.
+     * @param empireId The ID of the empire to teleport to.
+     * @returns Whether the teleport was successful.
+     */
+    export function teleport(player: Player, empireId: string) {
+        const profile = EmpireProfileManager.load(empireId, true);
+        if (profile && profile.Data.accessCode) {
+            TeleportService.TeleportToPrivateServer(
+                game.PlaceId,
+                profile.Data.accessCode,
+                [player],
+                undefined,
+                empireId,
+            );
+            return true;
+        }
+        return false;
+    }
+
+    export function viewPlayerData(userId: number) {
+        const playerProfile = PlayerProfileManager.load(userId, true);
+        if (playerProfile === undefined) throw "No player profile for userId " + userId;
+        return playerProfile.Data;
+    }
+
+    export function registerPlayer(player: Player) {
+        const availableEmpires = get(player.UserId);
+        pcall(() => {
+            for (const [id, empire] of availableEmpires) {
+                if (empire.owner === 0) {
+                    availableEmpires.delete(id);
+                    warn("ridded public from available empires");
+                }
+            }
+            if (!IS_PUBLIC_SERVER) {
+                availableEmpires.set(Server.Data.empireId, getInfo(Server.Data.empireId));
+            }
+        });
+        pcall(() => {
+            if (IS_EDIT) return;
+            BadgeService.AwardBadge(player.UserId, 938343607591069); // join badge
+        });
+
+        const playerProfile = PlayerProfileManager.load(player.UserId);
+        if (playerProfile === undefined) throw "No player profile for player " + player.Name;
+        const playerData = playerProfile.Data;
+        dataPerPlayer.set(player.UserId, playerData);
+
+        let changed = false;
+        if (playerData.availableEmpires !== undefined) {
+            for (const empireId of playerData.availableEmpires) {
+                availableEmpires.set(empireId, getInfo(empireId));
+            }
+            playerData.availableEmpires = undefined;
+            changed = true;
+        }
+        if (playerData.ownedEmpires !== undefined) {
+            for (const owned of playerData.ownedEmpires) {
+                if (!availableEmpires.has(owned)) {
+                    availableEmpires.set(owned, getInfo(owned));
+                    changed = true;
+                }
+            }
+        }
+        if (changed === true) {
+            DATA_STORE?.SetAsync("Player_" + player.UserId, availableEmpires);
+            update(player.UserId, availableEmpires);
+            print(availableEmpires);
+            warn("Player data was modified to fix lossy and old data");
+        }
+        Packets.rawPurifierClicks.setFor(player, playerData.rawPurifierClicks);
+
+        const ownedEmpires = playerProfile?.Data.ownedEmpires;
+        if (
+            ownedEmpires !== undefined &&
+            !ownedEmpires.includes(Server.Data.empireId) &&
+            Server.empireData.owner === player.UserId
+        ) {
+            ownedEmpires.push(Server.Data.empireId);
+        }
+        if (IS_PUBLIC_SERVER) {
+            Packets.availableEmpires.setFor(player, availableEmpires);
+        }
+    }
+
+    export function unregisterPlayer(player: Player) {
+        PlayerProfileManager.unload(player.UserId);
+        availableEmpiresPerPlayer.delete(player.UserId);
+        dataPerPlayer.delete(player.UserId);
+    }
+}
+
+export default AvailableEmpire;

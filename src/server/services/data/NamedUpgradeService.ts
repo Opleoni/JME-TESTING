@@ -1,0 +1,210 @@
+//!native
+//!optimize 2
+
+/**
+ * @fileoverview Manages upgrades, their purchase, and synchronization.
+ *
+ * This service provides:
+ * - Tracking and updating upgrade amounts
+ * - Handling upgrade purchases and caps
+ * - Firing signals and syncing upgrades with clients
+ * - Applying upgrade effects (e.g., walk speed)
+ *
+ * @since 1.0.0
+ */
+
+import Signal from "@antivivi/lemon-signal";
+import { OnInit, Service } from "@flamework/core";
+import { Players, StarterPlayer, Workspace } from "@rbxts/services";
+import CurrencyService from "server/services/data/CurrencyService";
+import DataService from "server/services/data/DataService";
+import { log } from "server/services/permissions/LogService";
+import PermissionService from "server/services/permissions/PermissionService";
+import eat from "shared/hamster/eat";
+import NamedUpgrades from "shared/namedupgrade/NamedUpgrades";
+import Packets from "shared/Packets";
+import { AREAS } from "shared/world/Area";
+
+/**
+ * Service that manages upgrades for the current empire, including purchase and effects.
+ */
+@Service()
+export default class NamedUpgradeService implements OnInit {
+    /** Map of upgrade IDs to their current amounts. */
+    readonly upgrades: Map<string, number>;
+
+    /** Signal fired when upgrades change. */
+    upgradesChanged = new Signal<(upgrades: Map<string, number>) => void>();
+
+    /** Signal fired when an upgrade is bought. */
+    upgradeBought = new Signal<(player: Player, upgradeId: string, to: number, from: number) => void>();
+
+    constructor(
+        private dataService: DataService,
+        private currencyService: CurrencyService,
+        private permissionsService: PermissionService,
+    ) {
+        this.upgrades = this.dataService.empireData.upgrades;
+    }
+
+    /**
+     * Sets the amount for each upgrade from a map and syncs with clients.
+     *
+     * @param data Map of upgrade IDs to amounts.
+     */
+    setAmountPerUpgrade(data: Map<string, number>) {
+        this.upgrades.clear();
+        data.forEach((value, key) => this.upgrades.set(key, value));
+        this.upgradesChanged.fire(data);
+        Packets.upgrades.set(data);
+    }
+
+    /**
+     * Gets the current amount for a specific upgrade.
+     *
+     * @param upgradeId The upgrade ID.
+     */
+    getUpgradeAmount(upgradeId: string) {
+        return this.upgrades.get(upgradeId) ?? 0;
+    }
+
+    /**
+     * Sets the amount for a specific upgrade and syncs with clients.
+     *
+     * @param upgradeId The upgrade ID.
+     * @param amount The new amount.
+     */
+    setUpgradeAmount(upgradeId: string, amount: number) {
+        const upgrades = this.upgrades;
+        upgrades.set(upgradeId, amount);
+        this.upgradesChanged.fire(upgrades);
+        Packets.upgrades.set(upgrades);
+    }
+
+    /**
+     * Attempts to buy an upgrade, checking caps, price, and permissions.
+     * Deducts currency and updates state if successful.
+     *
+     * @param upgradeId The upgrade ID.
+     * @param to The target amount (optional).
+     * @param player The player buying the upgrade (optional).
+     * @param isFree Whether the upgrade is free (optional).
+     * @returns True if the upgrade was bought, false otherwise.
+     */
+    buyUpgrade(upgradeId: string, to?: number, player?: Player, isFree?: boolean) {
+        const upgrade = NamedUpgrades.ALL_UPGRADES.get(upgradeId);
+        if (upgrade === undefined) {
+            return false;
+        }
+        const current = this.getUpgradeAmount(upgradeId);
+        if (to === undefined) {
+            to = current + 1;
+        }
+        const cap = upgrade.cap;
+        if (cap !== undefined && to > cap) {
+            return false;
+        } else if (current >= to) {
+            return false;
+        }
+        const price = to === current + 1 ? upgrade.getPrice(to) : upgrade.getPrice(current + 1, to);
+        if (price === undefined) {
+            return false;
+        }
+        let success: boolean;
+        if (isFree === true) {
+            [success] = this.currencyService.canAfford(price);
+        } else {
+            success = this.currencyService.purchase(price);
+        }
+
+        if (success) {
+            this.setUpgradeAmount(upgradeId, to);
+            if (player !== undefined) {
+                this.upgradeBought.fire(player, upgradeId, to, current);
+            }
+        }
+        return success;
+    }
+
+    /**
+     * Initializes the NamedUpgradeService, sets up listeners and applies upgrade effects.
+     */
+    onInit() {
+        Packets.upgrades.set(this.upgrades);
+        Packets.buyUpgrade.fromClient((player, upgradeId, to) => {
+            if (!this.permissionsService.hasPermission(player, "purchase") || to === undefined) {
+                return false;
+            }
+            return this.buyUpgrade(upgradeId, to, player);
+        });
+
+        const WALKSPEED_UPGRADES = NamedUpgrades.getUpgrades("WalkSpeed");
+        const GRID_SIZE_UPGRADES = NamedUpgrades.getUpgrades("GridSize");
+
+        const onUpgradesChanged = (data: Map<string, number>) => {
+            const oldWs = Workspace.GetAttribute("WalkSpeed") as number | undefined;
+            let ws = 16;
+            WALKSPEED_UPGRADES.forEach((value, key) => (ws = value.apply(ws, data.get(key) ?? 0)));
+            Workspace.SetAttribute("WalkSpeed", ws);
+            StarterPlayer.CharacterWalkSpeed = ws;
+            for (const player of Players.GetPlayers()) {
+                const character = player.Character;
+                if (character === undefined) continue;
+                const humanoid = character.FindFirstChildOfClass("Humanoid");
+                if (humanoid === undefined) continue;
+                if (humanoid.WalkSpeed === oldWs) {
+                    humanoid.WalkSpeed = ws;
+                }
+            }
+
+            for (const [id, area] of pairs(AREAS)) {
+                const gridWorldNode = area.gridWorldNode;
+                if (gridWorldNode === undefined) continue;
+                const grid = gridWorldNode?.getInstance();
+                if (grid === undefined) continue;
+
+                // Calculate the new grid size based on applied upgrades
+                let size = gridWorldNode.originalSize;
+                if (size === undefined) continue;
+                GRID_SIZE_UPGRADES.forEach((upgrade, upgradeId) => {
+                    const amount = data.get(upgradeId);
+                    if (amount === undefined || size === undefined) return;
+                    if (upgrade.area === id) size = upgrade.apply(size, amount);
+                });
+
+                // Update the grid size if it has changed
+                if (grid.Size !== size) {
+                    grid.Size = size;
+                }
+            }
+        };
+        const changedConnection = this.upgradesChanged.connect(onUpgradesChanged);
+        onUpgradesChanged(this.upgrades);
+
+        const boughtConnection = this.upgradeBought.connect((player, upgrade, to) =>
+            log({
+                time: tick(),
+                type: "Upgrade",
+                player: player.UserId,
+                upgrade: upgrade,
+                amount: to,
+            }),
+        );
+        eat(() => {
+            changedConnection.Disconnect();
+            boughtConnection.Disconnect();
+
+            // Restore grid sizes to original after cleanup
+            for (const [, area] of pairs(AREAS)) {
+                const gridWorldNode = area.gridWorldNode;
+                if (gridWorldNode === undefined) continue;
+                const grid = gridWorldNode?.getInstance();
+                if (grid === undefined) continue;
+                const size = gridWorldNode.originalSize;
+                if (size !== undefined && grid.Size !== size) {
+                    grid.Size = size;
+                }
+            }
+        });
+    }
+}

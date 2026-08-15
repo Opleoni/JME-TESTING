@@ -1,0 +1,315 @@
+//!native
+//!optimize 2
+
+/**
+ * @fileoverview Core currency management system for the game.
+ *
+ * This service handles:
+ * - Currency balance tracking and manipulation
+ * - Purchase transactions and affordability checks
+ * - Revenue calculation and tracking
+ * - Currency propagation to clients
+ * - Historical currency records (most ever, most since reset)
+ * - Offline revenue estimation
+ *
+ * The service uses OnoeNum for big number arithmetic to handle very large currency values
+ * that exceed JavaScript's number precision limits.
+ *
+ * @since 1.0.0
+ */
+
+import Signal from "@antivivi/lemon-signal";
+import { simpleInterval } from "@antivivi/vrldk";
+import { OnStart, Service } from "@flamework/core";
+import { OnoeNum } from "@rbxts/serikanum";
+import DataService from "server/services/data/DataService";
+import Packets from "shared/Packets";
+import CurrencyBundle from "shared/currency/CurrencyBundle";
+import { CURRENCIES, CURRENCY_DETAILS } from "shared/currency/CurrencyDetails";
+import CurrencyMap from "shared/currency/CurrencyMap";
+import Queue from "shared/currency/Queue";
+import eat from "shared/hamster/eat";
+
+/** Constant zero value for performance optimization. */
+const ZERO = new OnoeNum(0);
+
+/**
+ * Core currency management service that handles all currency-related operations.
+ *
+ * Manages multiple currency types with big number support, tracks historical maximums,
+ * calculates revenue rates, and synchronizes currency data with clients.
+ */
+@Service()
+export default class CurrencyService implements OnStart {
+    // Core Currency Data
+
+    /**
+     * Current currency amounts - the main currency storage.
+     * Backed by empire data for persistence.
+     */
+    private readonly currencies: CurrencyMap;
+    private readonly currencyGainMultipliers: CurrencyMap;
+
+    /**
+     * Highest amounts ever reached for each currency.
+     * Used for achievements and statistics.
+     */
+    private readonly mostCurrencies: CurrencyMap;
+
+    /**
+     * Highest amounts reached since the last reset.
+     * Used for offline revenue calculations.
+     */
+    private readonly mostCurrenciesSinceReset: CurrencyMap;
+
+    // Public Interface
+
+    /**
+     * Public interface for currency balance operations.
+     * Provides a convenient API for currency manipulation.
+     */
+    readonly balance: CurrencyBundle;
+
+    /**
+     * Signal fired when currency balances change.
+     * Used by other systems to react to currency updates.
+     */
+    readonly balanceChanged = new Signal<(balance: CurrencyBundle) => void>();
+
+    /**
+     * Last propagated currency state for change detection.
+     * Prevents unnecessary network updates when currencies haven't changed.
+     */
+    lastPropagation?: CurrencyMap;
+
+    /**
+     * Initializes the CurrencyService with data from DataService.
+     * Sets up currency maps and creates the public balance interface.
+     *
+     * @param dataService Service providing persistent empire data.
+     */
+    constructor(private dataService: DataService) {
+        // Wrap empire data maps for reactive updates
+        this.currencies = CurrencyMap.wrap(dataService.empireData.currencies);
+        this.currencyGainMultipliers = CurrencyMap.wrap(dataService.empireData.currencyGainMultipliers);
+        this.mostCurrencies = CurrencyMap.wrap(dataService.empireData.mostCurrencies);
+        this.mostCurrenciesSinceReset = CurrencyMap.wrap(dataService.empireData.mostCurrenciesSinceReset);
+
+        // Create public balance interface
+        this.balance = new CurrencyBundle(this.currencies, true);
+    }
+
+    // Currency Access Methods
+
+    /**
+     * Gets the current amount of a specific currency.
+     *
+     * @param currency The currency type to retrieve.
+     * @returns The current amount, or zero if not found.
+     */
+    get(currency: Currency) {
+        return this.balance.get(currency) ?? ZERO;
+    }
+
+    /**
+     * Sets the amount of a specific currency.
+     *
+     * @param currency The currency type to set.
+     * @param amount The new amount (undefined to remove currency).
+     */
+    set(currency: Currency, amount: OnoeNum | undefined) {
+        this.balance.set(currency, amount);
+    }
+
+    /**
+     * Increases a currency by a specific amount.
+     *
+     * @param currency The currency type to increment.
+     * @param delta The amount to add.
+     */
+    increment(currency: Currency, delta: OnoeNum) {
+        return this.set(currency, this.get(currency).add(delta.mul(this.getGainMultiplier(currency))));
+    }
+
+    /**
+     * Replaces all currencies with the provided currency map.
+     * Clears existing currencies and sets new values.
+     *
+     * @param currencies The new currency amounts to set.
+     */
+    setAll(currencies: CurrencyMap) {
+        this.currencies.clear();
+        for (const [currency, amount] of currencies) {
+            this.currencies.set(currency, amount);
+        }
+    }
+
+    // Transaction Methods
+
+    /**
+     * Checks whether the amount of each currency in the balance satisfies the required currency amounts.
+     *
+     * @param required The currency amounts needed.
+     * @returns A tuple that contains if there is sufficient currencies and the remaining currency amounts after subtraction.
+     */
+    canAfford(required: CurrencyBundle): LuaTuple<[boolean, CurrencyBundle]> {
+        const result = new CurrencyBundle();
+        const sufficient = this.balance.canAfford(required.amountPerCurrency, result.amountPerCurrency);
+        return $tuple(sufficient, result);
+    }
+
+    /**
+     * Increments multiple currencies at once.
+     *
+     * @param delta Map of currencies and amounts to add.
+     */
+    incrementAll(delta: CurrencyMap) {
+        for (const [currency, amount] of delta) {
+            this.increment(currency, amount);
+        }
+    }
+
+    /**
+     * Gets the gain multiplier for a currency.
+     *
+     * @param currency The currency to check.
+     * @returns The gain multiplier, or 1 if unset.
+     */
+    getGainMultiplier(currency: Currency) {
+        return this.currencyGainMultipliers.get(currency) ?? new OnoeNum(1);
+    }
+
+    /**
+     * Sets the gain multiplier for a currency.
+     *
+     * @param currency The currency to update.
+     * @param multiplier The new gain multiplier.
+     */
+    setGainMultiplier(currency: Currency, multiplier: number) {
+        if (multiplier === 1) {
+            this.currencyGainMultipliers.delete(currency);
+        } else {
+            this.currencyGainMultipliers.set(currency, new OnoeNum(multiplier));
+        }
+    }
+
+    /**
+     * Sets the gain multiplier for every currency.
+     *
+     * @param multiplier The new gain multiplier.
+     */
+    setAllGainMultipliers(multiplier: number) {
+        if (multiplier === 1) {
+            this.currencyGainMultipliers.clear();
+            return;
+        }
+
+        for (const currency of CURRENCIES) {
+            this.currencyGainMultipliers.set(currency, new OnoeNum(multiplier));
+        }
+    }
+
+    /**
+     * Attempts to purchase something with the given price.
+     * Deducts currencies if affordable and not marked as free.
+     *
+     * @param price The cost of the purchase.
+     * @returns Whether the purchase was successful.
+     */
+    purchase(price: CurrencyBundle) {
+        const [isSufficient, remaining] = this.canAfford(price);
+        if (isSufficient === true) {
+            for (const [currency, amount] of remaining.amountPerCurrency) {
+                this.set(currency, amount);
+            }
+            return true;
+        }
+        return false;
+    }
+
+    // Synchronization Methods
+
+    /**
+     * Propagates currency changes to clients.
+     * Only sends updates when currencies have actually changed to optimize network usage.
+     */
+    propagate() {
+        const currencies = this.currencies;
+        if (this.lastPropagation !== undefined && CurrencyMap.equals(this.lastPropagation, currencies)) {
+            return;
+        }
+        this.lastPropagation = table.clone(currencies);
+
+        Packets.balance.set(currencies);
+        this.balanceChanged.fire(this.balance);
+    }
+
+    /**
+     * Naive implementation of offline revenue calculation.
+     * Assumes revenue generation over the current reset period is linear.
+     * @returns Revenue generated per second.
+     */
+    getOfflineRevenue() {
+        const currentPlaytime = this.dataService.empireData.playtime;
+        const lastResetPlaytime = this.dataService.empireData.lastResetPlaytime;
+        const diff = math.max(currentPlaytime - lastResetPlaytime, 600); // At least 10 minutes to avoid extreme values
+
+        return new CurrencyBundle(this.mostCurrenciesSinceReset).divConstant(diff);
+    }
+
+    onStart() {
+        // Create revenue tracking queues for each currency
+        const queuePerCurrency = new Map<Currency, Queue>();
+        for (const currency of CURRENCIES) {
+            queuePerCurrency.set(currency, new Queue());
+        }
+
+        const unimportantCleanup = simpleInterval(() => {
+            const revenue = new Map<Currency, OnoeNum>();
+
+            for (const [currency, amount] of this.currencies) {
+                // Remove invalid currencies
+                if (CURRENCY_DETAILS[currency] === undefined) {
+                    this.currencies.delete(currency);
+                    continue;
+                }
+
+                // Update all-time maximum
+                const most = this.mostCurrencies.get(currency);
+                if (most === undefined || amount.moreThan(most)) {
+                    this.mostCurrencies.set(currency, amount);
+                }
+
+                // Update maximum since reset
+                const mostSinceReset = this.mostCurrenciesSinceReset.get(currency);
+                if (mostSinceReset === undefined || amount.moreThan(mostSinceReset)) {
+                    this.mostCurrenciesSinceReset.set(currency, amount);
+                }
+
+                // Calculate revenue using queue averaging
+                const queue = queuePerCurrency.get(currency);
+                if (queue === undefined) {
+                    continue;
+                }
+                queue.addDelta(amount);
+                revenue.set(currency, queue.meanDelta());
+            }
+
+            // Propagate updates to clients
+            Packets.mostBalance.set(this.mostCurrencies);
+            Packets.revenue.set(revenue);
+        }, 1);
+
+        // Ensure Funds currency exists
+        if (!this.currencies.has("Funds")) this.currencies.set("Funds", new OnoeNum(0));
+
+        const importantCleanup = simpleInterval(() => {
+            this.propagate();
+        }, 0.1);
+
+        Packets.balance.setEntries(this.currencies);
+
+        eat(importantCleanup);
+        eat(unimportantCleanup);
+    }
+}

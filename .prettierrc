@@ -1,0 +1,22 @@
+{
+    "plugins": ["prettier-plugin-toml"],
+    "printWidth": 120,
+    "trailingComma": "all",
+    "useTabs": false,
+    "tabWidth": 4,
+    "endOfLine": "auto",
+    "overrides": [
+        {
+            "files": ["*.yml", "*.yaml"],
+            "options": {
+                "tabWidth": 2
+            }
+        },
+        {
+            "files": ["*.jsonc"],
+            "options": {
+                "trailingComma": "none"
+            }
+        }
+    ]
+}

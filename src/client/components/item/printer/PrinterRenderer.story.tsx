@@ -1,0 +1,66 @@
+/**
+ * @fileoverview UI Labs story for UpgradeBoard components.
+ * Provides interactive controls for testing upgrade selection and purchase functionality.
+ */
+
+import { OnoeNum } from "@rbxts/serikanum";
+import React, { useEffect } from "@rbxts/react";
+import ReactRoblox from "@rbxts/react-roblox";
+import { Workspace } from "@rbxts/services";
+import { CreateReactStory } from "@rbxts/ui-labs";
+import PrinterRenderer from "client/components/item/printer/PrinterRenderer";
+import Item from "shared/item/Item";
+import Items from "shared/items/Items";
+import Packets from "shared/Packets";
+
+export = CreateReactStory(
+    {
+        react: React,
+        reactRoblox: ReactRoblox,
+    },
+    () => {
+        useEffect(() => {
+            Packets.printedSetups.set([
+                {
+                    name: "Basic Setup",
+                    area: "BarrenIslands",
+                    autoloads: false,
+                    calculatedPrice: new Map([["Funds", new OnoeNum(5000)]]),
+                    items: [],
+                    alerted: false,
+                },
+            ]);
+        }, []);
+
+        useEffect(() => {
+            const testModels = new Array<Instance>();
+
+            const createTestModel = (item: Item) => {
+                const testModel = item.createModel({
+                    item: item.id,
+                    posX: -testModels.size() * 50,
+                    posY: 30,
+                    posZ: 0,
+                    rotX: 0,
+                    rotY: 0,
+                    rotZ: 0,
+                });
+                if (!testModel) return;
+                testModel.AddTag("Printer");
+                testModel.Parent = Workspace;
+                testModels.push(testModel);
+            };
+            for (const printer of Items.sortedItems) {
+                if (printer.findTrait("Printer")) {
+                    createTestModel(printer);
+                }
+            }
+
+            return () => {
+                testModels.forEach((model) => model.Destroy());
+            };
+        }, []);
+
+        return <PrinterRenderer />;
+    },
+);

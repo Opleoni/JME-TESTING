@@ -1,0 +1,38 @@
+import Difficulty from "@rbxts/ejt";
+import { OnoeNum } from "@rbxts/serikanum";
+import Generator from "shared/item/traits/generator/Generator";
+import Item from "shared/item/Item";
+import AdvancedBlankEssence from "shared/items/0/ifinitude/AdvancedBlankEssence";
+import PassiveBonanza from "shared/items/negative/instantwin/PassiveBonanza";
+import CurrencyBundle from "shared/currency/CurrencyBundle";
+import Formula from "shared/currency/Formula";
+import { Server } from "shared/api/APIExpose";
+import Class0Shop from "shared/items/0/Class0Shop";
+
+const amt = new OnoeNum(4e9);
+const base = new CurrencyBundle().set("Power", amt);
+
+export = new Item(script.Name)
+    .setName("Corrupted Bonanza")
+    .setDescription(
+        "Extracting a descending shadow, you find yourself trembling in quiet fear. Produces %gain%, this amount increasing with Skill. Caps at %cap%.",
+    )
+    .setDifficulty(Difficulty.Ifinitude)
+    .setRequiredItemAmount(AdvancedBlankEssence, 1)
+    .setRequiredItemAmount(PassiveBonanza, 1)
+    .setPrice(new CurrencyBundle().set("Skill", 30), 1)
+    .addPlaceableArea("BarrenIslands")
+    .soldAt(Class0Shop)
+
+    .setFormula(new Formula().pow(0.75).div(3).add(1))
+    .setFormulaX("skill")
+    .setFormulaXCap(new CurrencyBundle().set("Skill", 1e6))
+
+    .trait(Generator)
+    .setPassiveGain(base)
+    .applyFormula(
+        (v, item) => item.setPassiveGain(base.set("Power", amt.mul(v))),
+        () => Server.Currency.get("Skill"),
+    )
+
+    .exit();

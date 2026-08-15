@@ -1,0 +1,23 @@
+import Difficulty from "@rbxts/ejt";
+import CurrencyBundle from "shared/currency/CurrencyBundle";
+import Item from "shared/item/Item";
+import Conveyor from "shared/item/traits/conveyor/Conveyor";
+import Class1Shop from "shared/items/1/Class1Shop";
+
+export = new Item(script.Name)
+    .setName("Anti-Gravity Conveyor")
+    .setDescription("A convenient conveyor suspended mid-air. This is Class 1.")
+    .setDifficulty(Difficulty.Joyful)
+    .setPrice(new CurrencyBundle().set("Funds", 5), 1)
+    .setPrice(new CurrencyBundle().set("Funds", 5e24), 2)
+    .setPrice(new CurrencyBundle().set("Funds", 5e48), 3)
+    .setPrice(new CurrencyBundle().set("Funds", 5e72), 4)
+    .setPrice(new CurrencyBundle().set("Funds", 5e96), 5)
+    .setCreator("sanjay2133")
+    .addPlaceableArea("BarrenIslands", "SlamoVillage", "SkyPavilion")
+    .soldAt(Class1Shop)
+
+    .trait(Conveyor)
+    .setSpeed(4)
+
+    .exit();
