@@ -1,0 +1,9 @@
+{
+    "inputs": [],
+    "servers": {
+        "eemcp": {
+            "command": "node",
+            "args": ["./plugin/mcp/index.js"]
+        }
+    }
+}

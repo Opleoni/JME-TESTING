@@ -1,0 +1,60 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "bun: install",
+            "type": "shell",
+            "command": "bun install",
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "never",
+                "close": true
+            }
+        },
+        {
+            "label": "bun: dev",
+            "dependsOn": "bun: install",
+            "dependsOrder": "sequence",
+            "type": "shell",
+            "command": "bun run dev",
+            "isBackground": true,
+            "problemMatcher": [
+                "$tsc-watch",
+                {
+                    "owner": "typescript",
+                    "fileLocation": ["relative", "${workspaceFolder}"],
+                    "pattern": {
+                        "regexp": "^(.+\\.ts):(\\d+):(\\d+) - error TS roblox-ts: (.*)$",
+                        "file": 1,
+                        "line": 2,
+                        "column": 3,
+                        "message": 4
+                    }
+                }
+            ],
+            "presentation": {
+                "reveal": "never",
+                "panel": "dedicated"
+            },
+            "runOptions": {
+                "runOn": "folderOpen"
+            }
+        },
+        {
+            "label": "bun: plugin dev",
+            "dependsOn": "bun: install",
+            "dependsOrder": "sequence",
+            "type": "shell",
+            "command": "bun run dev:plugin",
+            "isBackground": true,
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "never",
+                "panel": "dedicated"
+            },
+            "runOptions": {
+                "runOn": "folderOpen"
+            }
+        }
+    ]
+}

@@ -1,0 +1,10 @@
+{
+    "recommendations": [
+        "dbaeumer.vscode-eslint",
+        "esbenp.prettier-vscode",
+        "johnnymorganz.luau-lsp",
+        "evilbocchi.rbxtsasvs",
+        "roblox-ts.vscode-roblox-ts",
+        "orta.vscode-jest"
+    ]
+}
